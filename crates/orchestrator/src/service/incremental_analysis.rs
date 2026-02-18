@@ -183,6 +183,21 @@ impl IncrementalAnalysisService {
         self.file_states.len()
     }
 
+    /// Merges freshly generated codebase issues into the cached set.
+    ///
+    /// Retains cached issues for files in `files_to_skip` (all symbols safe, not re-analyzed)
+    /// and replaces with `new_issues` for all other files. Without this merge, safe-symbol
+    /// issues are permanently lost because `populate_codebase_targeted` doesn't regenerate
+    /// them and `take_issues` drained them in a previous cycle.
+    fn merge_codebase_issues(&mut self, new_issues: IssueCollection, files_to_skip: &HashSet<FileId>) {
+        let old_issues = std::mem::take(&mut self.codebase_issues);
+        self.codebase_issues = old_issues
+            .into_iter()
+            .filter(|issue| issue.annotations.first().is_some_and(|a| files_to_skip.contains(&a.span.file_id)))
+            .collect();
+        self.codebase_issues.extend(new_issues);
+    }
+
     /// Assembles the full issue list from codebase-level issues + all per-file cached issues.
     ///
     /// This avoids storing a separate snapshot by reconstructing on demand.
@@ -257,7 +272,7 @@ impl IncrementalAnalysisService {
         populate_codebase(&mut merged_codebase, &mut symbol_references, AtomSet::default(), HashSet::default());
 
         let (mut analysis_result, per_file_issues) =
-            self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, HashSet::default())?;
+            self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, &HashSet::default())?;
 
         self.codebase_issues = merged_codebase.take_issues(true);
         analysis_result.issues.extend(self.codebase_issues.iter().cloned());
@@ -508,10 +523,16 @@ impl IncrementalAnalysisService {
                 changed_symbols,
             );
 
-            let (mut analysis_result, mut per_file_issues) =
-                self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, files_to_skip)?;
+            // Clear safe_symbols before analysis — they were needed for populate_codebase_targeted
+            // but must not leak into the analyzer (see non-body-only path for explanation).
+            merged_codebase.safe_symbols.clear();
+            merged_codebase.safe_symbol_members.clear();
 
-            self.codebase_issues = merged_codebase.take_issues(true);
+            let (mut analysis_result, mut per_file_issues) =
+                self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+
+            let new_codebase_issues = merged_codebase.take_issues(true);
+            self.merge_codebase_issues(new_codebase_issues, &files_to_skip);
 
             for (file_id, metadata) in new_file_scans {
                 let content_hash = file_hashes[&file_id];
@@ -598,10 +619,19 @@ impl IncrementalAnalysisService {
             }
         }
 
-        let (mut analysis_result, mut per_file_issues) =
-            self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, files_to_skip)?;
+        // Clear safe_symbols from the codebase before passing to the analyzer.
+        // The safe_symbols are used above to compute files_to_skip, but must not
+        // be present during analysis as they can cause the analyzer to skip checks
+        // even when settings.diff is false.
+        merged_codebase.safe_symbols.clear();
+        merged_codebase.safe_symbol_members.clear();
 
-        self.codebase_issues = merged_codebase.take_issues(true);
+        let (mut analysis_result, mut per_file_issues) =
+            self.run_analyzer_selective(&merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+
+        let new_codebase_issues = merged_codebase.take_issues(true);
+        self.merge_codebase_issues(new_codebase_issues, &files_to_skip);
+
         self.file_states.retain(|id, _| current_file_ids.contains(id));
 
         let changed_file_ids: HashSet<FileId> = new_file_scans.iter().map(|(fid, _)| *fid).collect();
@@ -679,7 +709,7 @@ impl IncrementalAnalysisService {
         codebase: &CodebaseMetadata,
         current_symbol_references: SymbolReferences,
         settings: &Settings,
-        skip_files: HashSet<FileId>,
+        skip_files: &HashSet<FileId>,
     ) -> Result<(AnalysisResult, HashMap<FileId, IssueCollection>), OrchestratorError> {
         #[cfg(not(target_arch = "wasm32"))]
         const ANALYSIS_DURATION_THRESHOLD: Duration = Duration::from_millis(5000);
