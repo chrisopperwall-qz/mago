@@ -452,12 +452,6 @@ impl IncrementalAnalysisService {
         };
 
         let body_only = diff.get_changed().is_empty() && deleted_count == 0;
-        tracing::debug!(
-            "Incremental analysis: body_only={}, changed_signatures={}, deleted={}",
-            body_only,
-            diff.get_changed().len(),
-            deleted_count,
-        );
 
         if !body_only {
             for &file_id in &unchanged_file_ids {
@@ -543,7 +537,6 @@ impl IncrementalAnalysisService {
             for (file_id, metadata) in new_file_scans {
                 let content_hash = file_hashes[&file_id];
                 let issues = per_file_issues.remove(&file_id).unwrap_or_default();
-
                 let entry_keys = metadata.extract_keys();
                 self.file_states.insert(file_id, FileState { content_hash, entry_keys, analysis_issues: issues });
             }
@@ -659,7 +652,6 @@ impl IncrementalAnalysisService {
         for (file_id, metadata) in new_file_scans {
             let content_hash = file_hashes[&file_id];
             let issues = per_file_issues.remove(&file_id).unwrap_or_default();
-
             let entry_keys = metadata.extract_keys();
             self.file_states.insert(file_id, FileState { content_hash, entry_keys, analysis_issues: issues });
         }
@@ -774,12 +766,6 @@ impl IncrementalAnalysisService {
                 Ok((file_id, analysis_result))
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
-
-        tracing::debug!(
-            "run_analyzer_selective: analyzed {} files, skipped {} files",
-            results.len(),
-            skip_files.len(),
-        );
 
         let mut aggregated_result = AnalysisResult::new(current_symbol_references);
         let mut per_file_issues: HashMap<FileId, IssueCollection> = HashMap::default();
